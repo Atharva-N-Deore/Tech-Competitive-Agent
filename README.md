@@ -88,7 +88,7 @@ python main.py
 │        │  ┌───────────────────────────────────────┐                 │
 │        │  │   THE AGENTIC LOOP (while True)       │                 │
 │        │  │                                       │                 │
-│        │  │  POST messages → LLM API (LiteLLM)   │                 │
+│        │  │  POST messages → LLM API (LiteLLM)    │                 │
 │        │  │         │                             │                 │
 │        │  │  finish_reason == "tool_calls"?       │                 │
 │        │  │    YES → agent/tool_executor.py       │                 │

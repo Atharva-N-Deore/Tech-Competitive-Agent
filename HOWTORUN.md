@@ -23,18 +23,26 @@ In VS Code: press `` Ctrl+` `` to open the integrated terminal. Make sure the pa
 ### 2. Create the virtual environment
 
 ```powershell
-python -m venv .venv
+python -m venv C:\venv_cia
 ```
 
-This creates a `.venv/` folder with an isolated Python installation. You only do this once.
+This creates the virtual environment at `C:\venv_cia`. You only do this once.
+
+> **Why not `.venv` inside the project folder?**
+> Windows has a 260-character path limit. This project's folder name is long enough that packages like `litellm` silently fail to install some of their subdirectories when the venv lives inside it. Creating the venv at a short root path (`C:\venv_cia`) avoids this entirely.
+>
+> If you want to lift the limit system-wide instead, run this once in an **admin** PowerShell, then you can use any path:
+> ```powershell
+> Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1
+> ```
 
 ### 3. Activate the virtual environment
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+C:\venv_cia\Scripts\Activate.ps1
 ```
 
-You'll see `(.venv)` appear at the start of your prompt. **You must activate the venv every time you open a new terminal.** If you see `(.venv)` in the prompt, it's active.
+You'll see `(venv_cia)` appear at the start of your prompt. **You must activate the venv every time you open a new terminal.**
 
 > **Troubleshooting:** If PowerShell says "execution of scripts is disabled", run this once:
 > ```powershell
@@ -209,41 +217,24 @@ python -c "from scheduler.jobs import daily_report; daily_report()"
 
 ## Simulating a Change (for Testing Without Waiting)
 
-To see the signal detection and analysis work immediately, inject a fake change into the database:
+To see the signal detection and analysis work immediately, inject a fake change into the database.
 
+> **Why a script file instead of `python -c "..."`?**
+> PowerShell cannot handle escaped double-quotes (`\"`) inside a `python -c "..."` string — it breaks the parser. Saving to a `.py` file sidesteps this completely.
+
+**Step 1 — run the seed script** (already in the project root):
 ```powershell
-python -c "
-import sqlite3, hashlib
-
-conn = sqlite3.connect('data/intelligence.db')
-
-# Get the latest Razorpay news snapshot
-row = conn.execute(
-    'SELECT id, content_text FROM page_snapshots WHERE source_type=? ORDER BY scraped_at DESC LIMIT 1',
-    ('news',)
-).fetchone()
-
-if row:
-    # Append a fake funding headline
-    new_text = row[1] + '\nWed, 04 Jun 2026 | TechCrunch | Razorpay raises Series F at 10B valuation'
-    new_hash = hashlib.sha256(new_text.encode()).hexdigest()
-    conn.execute(
-        'UPDATE page_snapshots SET content_text=?, content_hash=? WHERE id=?',
-        (new_text, new_hash, row[0])
-    )
-    conn.commit()
-    print('Done — now run: python -c \"from scheduler.jobs import scrape_news; scrape_news()\"')
-else:
-    print('No news snapshot found — run scrape_news() first.')
-"
+python seed_signal.py
 ```
 
-Then trigger the scraper to detect the change:
+If you see `No news snapshot found`, run `scrape_news` first (step 3 below), then re-run this.
+
+**Step 2 — trigger the scraper** to detect the injected change:
 ```powershell
 python -c "from scheduler.jobs import scrape_news; scrape_news()"
 ```
 
-Then run analysis:
+**Step 3 — run analysis** so the LLM processes the new signal:
 ```powershell
 python -c "from scheduler.jobs import run_analysis; run_analysis()"
 ```
@@ -291,7 +282,8 @@ Press `Ctrl+C` in the terminal where `python main.py` is running.
 | `litellm.exceptions.NotFoundError` | `MODEL_ID` is misspelled or unsupported | Check the provider prefix — e.g. `anthropic/`, `groq/`, `ollama/` |
 | `Connection refused` with Ollama | Ollama server not running | Run `ollama serve` in a separate terminal |
 | `playwright._impl._errors.Error: Executable doesn't exist` | Playwright browser not installed | Run `playwright install chromium` |
-| `ModuleNotFoundError: No module named 'litellm'` | Venv not activated or packages not installed | Activate `.venv` then run `pip install -r requirements.txt` |
+| `ModuleNotFoundError: No module named 'litellm'` | Venv not activated or packages not installed | Activate the venv then run `pip install -r requirements.txt` |
+| `ModuleNotFoundError: No module named 'litellm.types'` | Venv created inside the project folder — Windows path-length limit silently skipped litellm's subdirectories during install | Create the venv at a short path: `python -m venv C:\venv_cia`, activate it, and reinstall requirements |
 | `httpx.ConnectError` | No internet connection or site blocked the request | Check your connection; the scraper will retry automatically |
 | `sqlite3.OperationalError: no such table` | Database not initialized | This auto-runs on startup — check that `data/` folder exists |
 | `No signals found` during analysis | No changes detected yet | Wait for 2+ scrape cycles, or inject a test change (see above) |

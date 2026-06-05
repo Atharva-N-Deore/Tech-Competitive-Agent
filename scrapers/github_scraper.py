@@ -52,6 +52,15 @@ class GithubScraper(BaseScraper):
                 f"https://api.github.com/orgs/{org}/repos",
                 params={"sort": "updated", "per_page": 10}
             )
+            if resp.status_code == 401 and "Authorization" in headers:
+                # Token is invalid or expired — retry without auth rather than crashing.
+                logger.warning(f"GitHub token rejected (401) — falling back to unauthenticated for {org}. Check GITHUB_TOKEN in .env.")
+                headers.pop("Authorization")
+                resp = await client.get(
+                    f"https://api.github.com/orgs/{org}/repos",
+                    params={"sort": "updated", "per_page": 10},
+                    headers=headers,
+                )
             if resp.status_code == 404:
                 logger.warning(f"GitHub org not found: {org}")
                 return []
