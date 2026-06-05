@@ -9,7 +9,7 @@ Everything you need to install, configure, and run the agent from scratch.
 Before starting, make sure you have:
 
 - **Python 3.11 or newer** — check with `python --version`
-- **An Anthropic API key** — sign up at console.anthropic.com, go to API Keys, and create one
+- **An API key for your chosen model provider** — see the `.env` setup step below for options. If you want to run a local model with Ollama, no key is needed at all.
 - *(Optional)* **A GitHub Personal Access Token** — increases GitHub API rate limits from 60 to 5,000 requests/hour
 
 ---
@@ -65,18 +65,40 @@ Copy the template:
 Copy-Item .env.example .env
 ```
 
-Then open `.env` and fill in your values:
-```
-ANTHROPIC_API_KEY=sk-ant-api03-your-actual-key-here
-GITHUB_TOKEN=ghp_your-github-token-here
-LOG_LEVEL=INFO
-```
+Then open `.env`. The two things you must set are **`MODEL_ID`** and the matching API key for that provider.
 
-**How to get an Anthropic API key:**
-1. Go to console.anthropic.com
-2. Click "API Keys" in the left sidebar
-3. Click "Create Key"
-4. Copy the key immediately — you can't view it again after closing the dialog
+**Option A — Anthropic Claude (cloud, default)**
+```
+MODEL_ID=anthropic/claude-sonnet-4-6
+ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
+```
+Get a key: console.anthropic.com → API Keys → Create Key. Copy it immediately — you can't view it again.
+
+**Option B — OpenAI (cloud)**
+```
+MODEL_ID=gpt-4o
+OPENAI_API_KEY=sk-your-key-here
+```
+Get a key: platform.openai.com → API keys.
+
+**Option C — Groq (cloud, free tier available)**
+```
+MODEL_ID=groq/llama-3.3-70b-versatile
+GROQ_API_KEY=gsk_your-key-here
+```
+Get a key: console.groq.com → API Keys.
+
+**Option D — Ollama (local, no API key needed)**
+```
+MODEL_ID=ollama/llama3.2
+```
+You need [Ollama](https://ollama.com) installed and the model pulled:
+```powershell
+ollama pull llama3.2
+```
+Ollama must be running (`ollama serve`) before you start the agent. No internet required after the initial model download.
+
+> **Note on local models and tool use:** Tool calling (function calling) works reliably with large models. Smaller local models (7B parameters or fewer) may struggle to follow tool-use instructions consistently — if analysis looks wrong or tools never get called, try a larger model.
 
 **How to get a GitHub token (optional):**
 1. Go to github.com → Settings → Developer settings → Personal access tokens → Tokens (classic)
@@ -129,10 +151,10 @@ The agent is now running. It will continue scraping on a schedule until you pres
 | `scrape_github` | Every 2 hours | Calls GitHub API for repo activity |
 | `scrape_jobs` | Every 4 hours | Opens career pages in headless Chromium |
 | `scrape_websites` | Every 6 hours | Fetches homepage text |
-| `run_analysis` | 6am, 12pm, 6pm, midnight IST | Sends new signals to Claude for analysis |
+| `run_analysis` | 6am, 12pm, 6pm, midnight IST | Sends new signals to the LLM for analysis |
 | `daily_report` | 8am IST | Prints and saves a morning digest |
 
-**First analysis:** The agent needs to detect signals (changes) before Claude can analyze anything. If you're testing the first time, wait for at least two scrape cycles (2+ hours) for changes to appear.
+**First analysis:** The agent needs to detect signals (changes) before the LLM can analyze anything. If you're testing the first time, wait for at least two scrape cycles (2+ hours) for changes to appear.
 
 ---
 
@@ -176,7 +198,7 @@ You don't have to wait for the scheduler. You can trigger any job immediately:
 # Run all four scrapers right now
 python -c "from scheduler.jobs import scrape_news, scrape_github, scrape_jobs, scrape_websites; scrape_news(); scrape_github()"
 
-# Run just the analysis (Claude)
+# Run just the analysis (LLM)
 python -c "from scheduler.jobs import run_analysis; run_analysis()"
 
 # Run the daily report
@@ -265,12 +287,15 @@ Press `Ctrl+C` in the terminal where `python main.py` is running.
 
 | Error | Cause | Fix |
 |---|---|---|
-| `KeyError: 'ANTHROPIC_API_KEY'` | `.env` file missing or key not set | Create `.env` from `.env.example` and fill in the key |
+| `AuthenticationError` or `401` | API key missing or wrong for the chosen provider | Check that `.env` has the correct key for your `MODEL_ID`'s provider |
+| `litellm.exceptions.NotFoundError` | `MODEL_ID` is misspelled or unsupported | Check the provider prefix — e.g. `anthropic/`, `groq/`, `ollama/` |
+| `Connection refused` with Ollama | Ollama server not running | Run `ollama serve` in a separate terminal |
 | `playwright._impl._errors.Error: Executable doesn't exist` | Playwright browser not installed | Run `playwright install chromium` |
-| `ModuleNotFoundError: No module named 'anthropic'` | Venv not activated or packages not installed | Activate `.venv` then run `pip install -r requirements.txt` |
+| `ModuleNotFoundError: No module named 'litellm'` | Venv not activated or packages not installed | Activate `.venv` then run `pip install -r requirements.txt` |
 | `httpx.ConnectError` | No internet connection or site blocked the request | Check your connection; the scraper will retry automatically |
 | `sqlite3.OperationalError: no such table` | Database not initialized | This auto-runs on startup — check that `data/` folder exists |
 | `No signals found` during analysis | No changes detected yet | Wait for 2+ scrape cycles, or inject a test change (see above) |
+| Analysis runs but tool calls never happen | Local model too small to follow tool-use instructions | Switch to a larger model (13B+) or a cloud provider |
 
 ---
 

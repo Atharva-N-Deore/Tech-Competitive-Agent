@@ -1,6 +1,8 @@
 # Competitive Intelligence Agent
 
-Monitors Indian tech companies (Razorpay, Zepto, PhonePe, Meesho) — scrapes their websites, job postings, press releases, and GitHub repos on a schedule. Detects signals like "they just hired 10 ML engineers" or "their pricing page changed" and uses Claude to summarize strategic implications.
+Monitors Indian tech companies (Razorpay, Zepto, PhonePe, Meesho) — scrapes their websites, job postings, press releases, and GitHub repos on a schedule. Detects signals like "they just hired 10 ML engineers" or "their pricing page changed" and uses an LLM to summarize strategic implications.
+
+Works with any model: Anthropic Claude, OpenAI GPT, local models via Ollama, Groq, and more — swap providers by changing one line in your `.env`.
 
 **Learning objectives:** scheduled agents, web scraping, memory with change detection, long-horizon AI reasoning.
 
@@ -13,7 +15,7 @@ See [HOWTORUN.md](HOWTORUN.md) for the full setup guide.
 ```powershell
 python -m venv .venv && .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt && playwright install chromium
-# fill in ANTHROPIC_API_KEY in .env (copy from .env.example)
+# copy .env.example → .env, set MODEL_ID and the matching API key
 python main.py
 ```
 
@@ -86,19 +88,19 @@ python main.py
 │        │  ┌───────────────────────────────────────┐                 │
 │        │  │   THE AGENTIC LOOP (while True)       │                 │
 │        │  │                                       │                 │
-│        │  │  POST messages → Claude API           │                 │
+│        │  │  POST messages → LLM API (LiteLLM)   │                 │
 │        │  │         │                             │                 │
-│        │  │  stop_reason == "tool_use"?           │                 │
+│        │  │  finish_reason == "tool_calls"?       │                 │
 │        │  │    YES → agent/tool_executor.py       │                 │
 │        │  │            execute_tool(name, input)  │                 │
 │        │  │            → queries database/db.py   │                 │
 │        │  │            append result → loop again │                 │
 │        │  │         │                             │                 │
-│        │  │  stop_reason == "end_turn"?           │                 │
+│        │  │  finish_reason == "stop"?             │                 │
 │        │  │    YES → extract final text → EXIT    │                 │
 │        │  └───────────────────────────────────────┘                 │
 │        │                                                            │
-│        │  Claude calls save_analysis tool                           │
+│        │  LLM calls save_analysis tool                              │
 │        └──→ database/db.py  insert_analysis()                       │
 └────────────────────────────┬────────────────────────────────────────┘
                              │  every day at 8am IST
@@ -138,8 +140,8 @@ detection/
   differ.py                  ← unified diff + similarity ratio
   signal_extractor.py        ← rule-based signal typing
 agent/
-  tools.py                   ← Claude tool definitions (JSON Schema)
-  tool_executor.py           ← Python functions Claude calls
+  tools.py                   ← tool definitions (OpenAI JSON Schema format, works with any provider)
+  tool_executor.py           ← Python functions the LLM calls
   analyst.py                 ← THE AGENTIC LOOP (most important file)
 scheduler/
   jobs.py                    ← APScheduler job definitions
@@ -154,7 +156,8 @@ reports/
 | What | Tool Used | Why This, Not That |
 |---|---|---|
 | Language | Python 3.11+ | Best ecosystem for scraping + AI |
-| LLM | Anthropic Claude (claude-sonnet-4-6) | Tool use, long context, strong reasoning |
+| LLM routing | LiteLLM | Single interface for 100+ providers — swap models by changing `MODEL_ID` |
+| Default model | `anthropic/claude-sonnet-4-6` | Tool use, long context, strong reasoning — but any model works |
 | JS-rendered scraping | Playwright | Better than Selenium (faster, async-native) |
 | Static scraping | httpx + BeautifulSoup | httpx is async; requests is synchronous |
 | Database | SQLite | No server needed; perfect for local agent |
