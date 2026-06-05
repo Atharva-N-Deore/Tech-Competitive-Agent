@@ -8,19 +8,24 @@ from dotenv import load_dotenv
 # Alternative: you could pass the key directly in code, but that risks committing secrets to git.
 load_dotenv()
 
-# os.environ["KEY"] raises a KeyError immediately if the key is missing.
-# This is intentional — it's better to crash on startup with a clear error than to
-# run silently and fail deep inside a scraper.
-# Alternative: os.getenv("KEY") returns None instead of crashing — use that for OPTIONAL keys.
-ANTHROPIC_API_KEY: str = os.environ["ANTHROPIC_API_KEY"]
+# All LLM API keys are optional here — LiteLLM reads them from the environment
+# automatically by name (ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, etc.).
+# If you're running a local model via Ollama, no key is needed at all.
+ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 
 # GITHUB_TOKEN is optional — without it, GitHub's API allows 60 requests/hour.
 # With a token, the limit is 5,000 requests/hour.
 GITHUB_TOKEN: str | None = os.getenv("GITHUB_TOKEN")
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
-MODEL_ID: str = "claude-sonnet-4-6"
-MAX_TOKENS: int = 4096  # maximum tokens Claude can write in its response
+# MODEL_ID uses LiteLLM's "provider/model" format. Examples:
+#   anthropic/claude-sonnet-4-6   — Anthropic API (requires ANTHROPIC_API_KEY)
+#   gpt-4o                        — OpenAI API (requires OPENAI_API_KEY)
+#   groq/llama3-8b-8192           — Groq API (requires GROQ_API_KEY, has free tier)
+#   ollama/llama3.2               — local model via Ollama, no key needed
+# Set MODEL_ID in your .env file to switch providers without touching code.
+MODEL_ID: str = os.getenv("MODEL_ID", "anthropic/claude-sonnet-4-6")
+MAX_TOKENS: int = 4096  # maximum tokens the model can write in its response
 
 # Path(__file__) is the absolute path to THIS file (settings.py).
 # .parent gives the config/ folder, .parent.parent gives the project root.

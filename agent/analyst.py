@@ -1,21 +1,25 @@
 import json
-import anthropic
+import litellm
 from loguru import logger
 from agent.tools import ALL_TOOLS
 from agent.tool_executor import execute_tool
 from database import db
-from config.settings import ANTHROPIC_API_KEY, MODEL_ID, MAX_TOKENS
+from config.settings import MODEL_ID, MAX_TOKENS
 
-# The system prompt is constant across ALL analysis calls — it defines Claude's role,
-# reasoning style, and output format. It is sent with every API call but does not
-# appear in the `messages` list (it has its own dedicated `system` parameter).
+# Silence LiteLLM's verbose success/retry logging — we handle our own logs.
+litellm.suppress_debug_info = True
+
+# The system prompt is constant across ALL analysis calls — it defines the model's role,
+# reasoning style, and output format. In the OpenAI message format (which LiteLLM uses),
+# the system prompt is sent as the first message with role "system" rather than as a
+# separate `system=` parameter like Anthropic's SDK used.
 #
 # Good system prompts for agents:
 #   1. Define a persona ("You are a competitive intelligence analyst")
 #   2. Specify the reasoning structure (our 4-layer framework)
 #   3. Provide an example of the desired output style
-#   4. Tell Claude which tools to use and when
-#   5. Tell Claude how to end (call save_analysis)
+#   4. Tell the model which tools to use and when
+#   5. Tell the model how to end (call save_analysis)
 SYSTEM_PROMPT = """You are a competitive intelligence analyst specializing in Indian tech companies.
 You have access to real-time signals about competitors: hiring patterns, website changes,
 GitHub activity, and press coverage.
@@ -37,14 +41,12 @@ Always call get_competitor_history to check if a signal is a new trend or an ong
 End your analysis by calling save_analysis with your final markdown report and key implications."""
 
 
-# Why sync anthropic.Anthropic instead of anthropic.AsyncAnthropic?
+# Why sync litellm.completion instead of litellm.acompletion?
 # We call this from APScheduler jobs that run in threads (not in an async event loop).
-# Using the sync client avoids the complexity of creating an event loop inside a thread.
-# The async client (AsyncAnthropic) is better when you're already in an async context
-# (e.g., a FastAPI endpoint) and want to await the response without blocking.
+# Using the sync call avoids the complexity of creating an event loop inside a thread.
+# litellm.acompletion is better when you're already in an async context (e.g. FastAPI)
+# and want to await the response without blocking.
 async def analyze_competitor(competitor_slug: str, signal_ids: list[int]) -> str | None:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
     competitor = db.get_competitor_by_slug(competitor_slug)
     if not competitor:
         logger.error(f"Competitor not found: {competitor_slug}")
@@ -55,7 +57,7 @@ async def analyze_competitor(competitor_slug: str, signal_ids: list[int]) -> str
         logger.info(f"No signals found for {competitor_slug}")
         return None
 
-    # Format signals into structured text. Claude performs better with structured input
+    # Format signals into structured text. Models perform better with structured input
     # than with raw JSON dumps — we make each signal a readable bullet point.
     signal_lines = []
     for s in signals:
@@ -76,80 +78,98 @@ async def analyze_competitor(competitor_slug: str, signal_ids: list[int]) -> str
         + "\n\nPlease analyze these signals and produce a strategic intelligence report."
     )
 
-    # The messages list is the full conversation history. We start with one user message.
-    # After each API call, we APPEND Claude's response to this list and send it all again.
-    # This is necessary because the Claude API is STATELESS — it has no memory between calls.
-    # Every call is independent; the only "memory" is what you send in the messages array.
-    messages = [{"role": "user", "content": user_message}]
+    # The messages list is the full conversation history. We start with the system prompt
+    # (as the first message) followed by one user message.
+    #
+    # Key difference from Anthropic SDK: Anthropic takes `system=` as a separate parameter.
+    # OpenAI format (which LiteLLM normalizes to) puts the system prompt as the first
+    # message with role "system". LiteLLM handles the translation when targeting Anthropic.
+    #
+    # After each API call we APPEND the model's response and any tool results to this list
+    # and send it all again. This is necessary because LLM APIs are STATELESS — every call
+    # is independent; the only "memory" is what you send in the messages array.
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
 
     logger.info(f"Starting analysis for {competitor_slug} with {len(signal_ids)} signals")
 
     # ── THE AGENTIC LOOP ──────────────────────────────────────────────────────
-    # This is the core pattern of any Claude-powered agent:
+    # The pattern is the same as before, but the response format is OpenAI's:
     #
     #   Send messages → get response
-    #   If stop_reason == "tool_use": execute tools → append results → repeat
-    #   If stop_reason == "end_turn": Claude is done → extract final text
+    #   If finish_reason == "tool_calls": execute tools → append results → repeat
+    #   If finish_reason == "stop":       model is done → extract final text
     #
-    # The loop can cycle multiple times before Claude finishes. Each iteration
-    # adds more context (tool results) to the conversation.
+    # Anthropic → OpenAI format differences:
+    #   stop_reason "tool_use"  → finish_reason "tool_calls"
+    #   stop_reason "end_turn"  → finish_reason "stop"
+    #   block.input (dict)      → tc.function.arguments (JSON string, must parse)
+    #   tool results in role "user" → tool results in role "tool" (own message per result)
     while True:
-        response = client.messages.create(
+        response = litellm.completion(
             model=MODEL_ID,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            tools=ALL_TOOLS,    # Claude can see these tool definitions
-            messages=messages,  # full conversation history
+            tools=ALL_TOOLS,
+            messages=messages,
         )
+
+        choice = response.choices[0]
+        message = choice.message
+        finish_reason = choice.finish_reason
 
         logger.debug(
-            f"Claude response: stop_reason={response.stop_reason}, "
-            f"blocks={[b.type for b in response.content]}, "
-            f"tokens={response.usage.input_tokens}in/{response.usage.output_tokens}out"
+            f"LLM response: finish_reason={finish_reason}, "
+            f"tokens={response.usage.prompt_tokens}in/{response.usage.completion_tokens}out"
         )
 
-        # Append Claude's response to the conversation history.
-        # response.content is a list of content blocks (TextBlock, ToolUseBlock, etc.).
-        # We must append it exactly as-is — the SDK accepts this format directly.
-        messages.append({"role": "assistant", "content": response.content})
+        # Append the assistant's response to the conversation history.
+        # We build a plain dict rather than passing the message object directly —
+        # this keeps the messages list serialisable and provider-agnostic.
+        assistant_msg: dict = {"role": "assistant", "content": message.content}
+        if message.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,  # kept as JSON string
+                    },
+                }
+                for tc in message.tool_calls
+            ]
+        messages.append(assistant_msg)
 
-        if response.stop_reason == "end_turn":
-            # "end_turn" = Claude finished naturally and has no more tool calls to make.
-            # The final response may contain multiple blocks — find the TextBlock.
-            # hasattr(block, "text") is used instead of block.type == "text" because
-            # the SDK might return different block types in different versions.
-            final_text = None
-            for block in response.content:
-                if hasattr(block, "text"):
-                    final_text = block.text
-                    break
+        if finish_reason == "stop":
+            # "stop" = model finished naturally with no more tool calls to make.
             db.mark_signals_processed(signal_ids)
             logger.success(f"Analysis complete for {competitor_slug}")
-            return final_text
+            return message.content
 
-        if response.stop_reason == "tool_use":
-            # Claude wants to call one or more tools. A single response can request
-            # multiple tool calls — process all of them.
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    logger.info(f"Tool call: {block.name}({json.dumps(block.input)})")
-                    result_str = execute_tool(block.name, block.input)
-                    tool_results.append({
-                        "type": "tool_result",
-                        # tool_use_id MUST match block.id — Claude uses this to pair
-                        # each tool result with the corresponding tool call it made.
-                        # Sending the wrong ID causes an API error.
-                        "tool_use_id": block.id,
-                        "content": result_str,  # must be a string, not a dict
-                    })
-            # Tool results are sent back as a "user" role message — that's the API convention.
-            # Then we loop: Claude receives its tool results and continues reasoning.
-            messages.append({"role": "user", "content": tool_results})
+        if finish_reason == "tool_calls":
+            # Model wants to call one or more tools. Process each one and append
+            # its result as a separate "tool" role message.
+            #
+            # Key difference from Anthropic: in OpenAI format each tool result is its
+            # own message with role "tool", not bundled into a single role "user" message.
+            # tool_call_id MUST match tc.id so the model can pair result to request.
+            for tc in message.tool_calls:
+                # tc.function.arguments is a JSON string — parse it to a dict before
+                # passing to execute_tool, which expects keyword arguments as a dict.
+                tool_input = json.loads(tc.function.arguments)
+                logger.info(f"Tool call: {tc.function.name}({json.dumps(tool_input)})")
+                result_str = execute_tool(tc.function.name, tool_input)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_str,
+                })
             continue
 
-        # Any other stop_reason (e.g., "max_tokens") is unexpected — log and exit.
-        logger.warning(f"Unexpected stop_reason: {response.stop_reason}")
+        # Any other finish_reason (e.g., "length" for max_tokens hit) is unexpected.
+        logger.warning(f"Unexpected finish_reason: {finish_reason}")
         break
     # ── END AGENTIC LOOP ──────────────────────────────────────────────────────
 
